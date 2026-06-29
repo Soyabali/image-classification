@@ -1,6 +1,6 @@
 fastapi==0.138.1
 uvicorn==0.49.0
 ultralytics
-opencv-python
+opencv-python-headless
 python-multipart
 numpy
