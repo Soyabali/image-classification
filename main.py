@@ -10,6 +10,7 @@ import shutil
 import uuid
 
 RESULTS_DIR = "results"
+# Fast api
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = FastAPI(
