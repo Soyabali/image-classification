@@ -1,16 +1,12 @@
 services:
   - type: web
     name: weather-image-classification-api
-    env: python
-    plan: starter
+    runtime: python
+    plan: free  # Free tier: 512 MB RAM, spins down after 15 min inactivity
     region: oregon
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: "pip install uv && uv pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.0"
-    disk:
-      name: results-storage
-      mountPath: /opt/render/project/src/results
-      sizeGB: 1
