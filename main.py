@@ -1,16 +1,16 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from ultralytics import YOLO
+import onnxruntime as ort
 import cv2
 import numpy as np
+import ast
 import tempfile
 import os
 import shutil
 import uuid
 
 RESULTS_DIR = "results"
-# Fast api
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = FastAPI(
@@ -21,8 +21,51 @@ app = FastAPI(
 
 app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
 
-MODEL_PATH = "best.pt"
-model = YOLO(MODEL_PATH)
+MODEL_PATH = "best.onnx"
+_session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+_input_name = _session.get_inputs()[0].name
+_imgsz = _session.get_inputs()[0].shape[2]  # 224
+_names: dict = ast.literal_eval(
+    _session.get_modelmeta().custom_metadata_map.get("names", "{}")
+)
+
+
+def _preprocess(image: np.ndarray) -> np.ndarray:
+    img = cv2.resize(image, (_imgsz, _imgsz))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = img.astype(np.float32) / 255.0
+    img = img.transpose(2, 0, 1)
+    return np.expand_dims(img, 0)
+
+
+def _softmax(x: np.ndarray) -> np.ndarray:
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+
+def _infer(image: np.ndarray):
+    raw = _session.run(None, {_input_name: _preprocess(image)})[0][0]
+    probs = _softmax(raw)
+    top5_idx = np.argsort(probs)[::-1][:5]
+    top1_class = _names[int(top5_idx[0])]
+    top1_conf = round(float(probs[top5_idx[0]]), 4)
+    top5 = [
+        {"class": _names[int(i)], "confidence": round(float(probs[i]), 4)}
+        for i in top5_idx
+    ]
+    return top1_class, top1_conf, top5
+
+
+def _annotate(image: np.ndarray, label: str, conf: float) -> np.ndarray:
+    h, w = image.shape[:2]
+    text = f"{label}  {conf:.1%}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.7, w / 800)
+    thickness = max(2, int(scale * 2))
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(image, (0, 0), (tw + 14, th + baseline + 14), (0, 0, 0), -1)
+    cv2.putText(image, text, (7, th + 7), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    return image
 
 
 @app.get("/")
@@ -46,18 +89,9 @@ async def predict_image(request: Request, file: UploadFile = File(...)):
     if image is None:
         raise HTTPException(status_code=400, detail="Could not decode image — ensure it is a valid image file")
 
-    results = model(image)[0] # to get the first result from the batch
-    probs = results.probs
+    top1_class, top1_conf, top5 = _infer(image)
+    annotated = _annotate(image.copy(), top1_class, top1_conf)
 
-    top1_class = results.names[int(probs.top1)]
-    top1_conf = round(float(probs.top1conf), 4)
-
-    top5 = [
-        {"class": results.names[int(idx)], "confidence": round(float(conf), 4)}
-        for idx, conf in zip(probs.top5, probs.top5conf)
-    ]
-
-    annotated = results.plot()
     filename = f"{uuid.uuid4()}.jpg"
     output_path = os.path.join(RESULTS_DIR, filename)
     cv2.imwrite(output_path, annotated)
@@ -89,8 +123,8 @@ async def predict_image_annotated(file: UploadFile = File(...)):
     if image is None:
         raise HTTPException(status_code=400, detail="Could not decode image — ensure it is a valid image file")
 
-    results = model(image)[0]
-    annotated = results.plot()
+    top1_class, top1_conf, _ = _infer(image)
+    annotated = _annotate(image.copy(), top1_class, top1_conf)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp.name, annotated)
@@ -140,12 +174,11 @@ async def predict_video(request: Request, file: UploadFile = File(...)):
             if not ret:
                 break
 
-            results = model(frame)[0]
-            top1_class = results.names[int(results.probs.top1)]
+            top1_class, top1_conf, _ = _infer(frame)
             class_counts[top1_class] = class_counts.get(top1_class, 0) + 1
             frame_count += 1
 
-            writer.write(results.plot())
+            writer.write(_annotate(frame.copy(), top1_class, top1_conf))
 
         cap.release()
         writer.release()
